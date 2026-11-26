@@ -259,8 +259,11 @@ func (rw *Writer) event(ev []byte) error {
 		}
 		// the tail is looked for before anything is put back, so a
 		// placeholder whose last brace is still to come isn't put back
-		// without it and the brace left behind
-		if !kept[key] && key != "obfuscation" {
+		// without it and the brace left behind. Complete atomic Gemini
+		// functionCall.args / functionResponse.response objects are not
+		// streamed string deltas, so holding a tail across frames would
+		// splice one call's ending onto the next call's argument.
+		if !kept[key] && key != "obfuscation" && !atomicCallPath(path) {
 			if n := partialTail(s); n > 0 {
 				if tails == nil {
 					tails, cuts = map[string]string{}, map[string]string{}
@@ -309,6 +312,26 @@ func waiting(name string, data []byte) bool {
 func sealedText(key, s string) bool {
 	return slices.Contains(signatureKeys, key) || strings.HasPrefix(s, "data:") ||
 		key == "data" && len(s) >= 64 && !strings.ContainsAny(s, " \n")
+}
+
+// atomicCallPath says path lies under a complete, non-delta Gemini
+// functionCall.args or functionResponse.response object. Each Gemini SSE
+// frame carries a whole call under the same path (e.g.
+// candidates.0.content.parts.0.functionCall.args.Path), unlike streamed
+// text or JSON-argument deltas. Streamed Gemini partialArgs live under
+// functionCall.partialArgs and are not matched here.
+func atomicCallPath(path string) bool {
+	return hasPathPair(path, "functionCall.args") ||
+		hasPathPair(path, "function_call.args") ||
+		hasPathPair(path, "functionResponse.response") ||
+		hasPathPair(path, "function_response.response")
+}
+
+func hasPathPair(path, pair string) bool {
+	return path == pair ||
+		strings.HasPrefix(path, pair+".") ||
+		strings.HasSuffix(path, "."+pair) ||
+		strings.Contains(path, "."+pair+".")
 }
 
 // holding says some value is masked, and may be put back.
