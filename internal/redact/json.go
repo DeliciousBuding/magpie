@@ -244,12 +244,21 @@ func walk(b []byte, fn func(path, key, s string) string) (out []byte, ok bool) {
 	return out, true
 }
 
+type pathStep struct {
+	arr bool
+	key string
+	obj int // unique id of the object at this step, when track is true
+}
+
 type walker struct {
-	in   []byte
-	out  bytes.Buffer
-	last int
-	fn   func(path, key, s string) string
-	bare func(path, key, raw string) // a number, true, false or null, when set
+	in      []byte
+	out     bytes.Buffer
+	last    int
+	fn      func(path, key, s string) string
+	bare    func(path, key, raw string) // a number, true, false or null, when set
+	track   bool                        // record exact pathStep stack and object ids
+	steps   []pathStep
+	nextObj int
 }
 
 func (w *walker) ws(i int) int {
@@ -286,6 +295,12 @@ func (w *walker) value(i int, path, key string) (int, bool) {
 	}
 	switch c := w.in[i]; c {
 	case '{':
+		if w.track {
+			w.nextObj++
+			if n := len(w.steps); n > 0 {
+				w.steps[n-1].obj = w.nextObj
+			}
+		}
 		i = w.ws(i + 1)
 		if i < len(w.in) && w.in[i] == '}' {
 			return i + 1, true
@@ -308,7 +323,14 @@ func (w *walker) value(i int, path, key string) (int, bool) {
 			if i >= len(w.in) || w.in[i] != ':' {
 				return i, false
 			}
-			if i, ok = w.value(w.ws(i+1), join(path, k), k); !ok {
+			if w.track {
+				w.steps = append(w.steps, pathStep{key: k})
+			}
+			i, ok = w.value(w.ws(i+1), join(path, k), k)
+			if w.track {
+				w.steps = w.steps[:len(w.steps)-1]
+			}
+			if !ok {
 				return i, false
 			}
 			i = w.ws(i)
@@ -328,8 +350,16 @@ func (w *walker) value(i int, path, key string) (int, bool) {
 		}
 		for n := 0; ; n++ {
 			var ok bool
+			seg := strconv.Itoa(n)
+			if w.track {
+				w.steps = append(w.steps, pathStep{arr: true, key: seg})
+			}
 			// an array's strings are under the key the array is
-			if i, ok = w.value(i, join(path, strconv.Itoa(n)), key); !ok {
+			i, ok = w.value(i, join(path, seg), key)
+			if w.track {
+				w.steps = w.steps[:len(w.steps)-1]
+			}
+			if !ok {
 				return i, false
 			}
 			i = w.ws(i)

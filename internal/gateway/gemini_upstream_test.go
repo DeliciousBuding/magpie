@@ -1,14 +1,17 @@
 package gateway
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // A custom provider's Gemini API (#1346, NagaseMinato), behind a relay's
@@ -92,4 +95,50 @@ func TestCustomGeminiUpstream(t *testing.T) {
 		t.Fatalf("gemini json: %d %s", code, body)
 	}
 	check("gemini json")
+}
+
+// The gateway's own IP stand-in begins with "public-ip-". With masking
+// active, STOP ends in a possible prefix of that stand-in, so two complete
+// finish enums used to come back as STO and PSTOP.
+func TestMaskedGeminiStreamKeepsFinishReason(t *testing.T) {
+	fresh(t)
+	const ip = "11.71.52.83"
+	standIn := regexp.MustCompile(`public-ip-[a-z]{8}`)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		masked := standIn.Find(b)
+		if err != nil || len(masked) == 0 || strings.Contains(string(b), ip) {
+			http.Error(w, "expected a masked address", http.StatusBadRequest)
+			return
+		}
+		text, _ := json.Marshal(string(masked))
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(
+			`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":`+string(text)+`}]}}]}`,
+			`data: {"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":6,"candidatesTokenCount":3}}`,
+			`data: {"candidates":[{"index":0,"finishReason":"STOP"}],"usageMetadata":{"totalTokenCount":9}}`,
+		))
+	}))
+	t.Cleanup(up.Close)
+	if err := provider.Save(provider.Provider{ID: "gem", Name: "Gem", Key: "fixture", Gemini: up.URL + "/v1beta", Models: []string{"m1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.Save(settings.Settings{Redact: true, RedactPersonal: true, RedactKinds: map[string]bool{"ip": true}}); err != nil {
+		t.Fatal(err)
+	}
+	code, body := post(t, "/v1beta/models/gem/m1:streamGenerateContent?alt=sse", `{"contents":[{"role":"user","parts":[{"text":"Echo the server address `+ip+`"}]}]}`)
+	if code != http.StatusOK || standIn.MatchString(body) || !strings.Contains(body, `"text":"`+ip+`"`) {
+		t.Fatalf("expected the reply to restore the address: %d %s", code, body)
+	}
+	var reasons []string
+	for _, line := range strings.Split(body, "\n") {
+		if data, ok := strings.CutPrefix(line, "data: "); ok {
+			if reason := gjson.Get(data, "candidates.0.finishReason"); reason.Exists() {
+				reasons = append(reasons, reason.String())
+			}
+		}
+	}
+	if got := strings.Join(reasons, ","); got != "STOP,STOP" {
+		t.Fatalf("finish reasons = %q, want STOP,STOP", got)
+	}
 }

@@ -2,8 +2,10 @@ package redact
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -37,14 +39,21 @@ const (
 	asIs
 )
 
+// heldTail is one string's possible placeholder start held back from an event.
+type heldTail struct {
+	key    string   // canonical text identity key
+	altIDs []string // secondary explicit ids on indexed array elements along the path
+	tail   string
+	ord    int    // string ordinal in walk order
+	cut    string // what is left without the tail, put back
+}
+
 // held is an event one or more of whose texts ended in what may be the
 // start of a placeholder: each one's tail by which text it is a piece of.
 type held struct {
 	ctx       string
-	tails     map[string]string // by text
-	text      map[string]string // the text of each path a tail was cut from
-	cuts      map[string]string // by path: what is left without the tail, put back
-	full      []byte            // the event as it is
+	tails     []heldTail
+	full      []byte // the event as it is
 	pre, post []byte
 	data      []byte // the event's JSON, put back
 }
@@ -52,12 +61,27 @@ type held struct {
 // out is the held event as it goes out ahead of the next one: cut where
 // the next event goes on with that text, whose tail it carries, and
 // whole everywhere else, where the text ended.
-func (h *held) out(on map[string]bool) []byte {
-	if len(on) == 0 {
+func (h *held) out(used []bool) []byte {
+	if len(used) == 0 {
 		return h.full
 	}
-	d, _ := walk(h.data, func(path, _, s string) string {
-		if c, ok := h.cuts[path]; ok && on[h.text[path]] {
+	var cuts map[int]string
+	for i, ht := range h.tails {
+		if used[i] {
+			if cuts == nil {
+				cuts = map[int]string{}
+			}
+			cuts[ht.ord] = ht.cut
+		}
+	}
+	if len(cuts) == 0 {
+		return h.full
+	}
+	idx := 0
+	d, _ := walk(h.data, func(_, _, s string) string {
+		i := idx
+		idx++
+		if c, ok := cuts[i]; ok {
 			return c
 		}
 		return s
@@ -248,7 +272,18 @@ func (rw *Writer) event(ev []byte) error {
 		_, err := rw.w.Write([]byte(restore(string(ev), false, rw.count())))
 		return err
 	}
-	if rw.pending != nil && waiting(name, data) {
+	typ, ctx, ok := topFields(name, data)
+	if !ok {
+		if p := rw.pending; p != nil {
+			if _, err := rw.w.Write(p.full); err != nil {
+				return err
+			}
+			rw.pending = nil
+		}
+		_, err := rw.w.Write(ev)
+		return err
+	}
+	if rw.pending != nil && slices.Contains(waitEvents, typ) {
 		// a keepalive between two pieces of a text goes on ahead of the
 		// piece held: released for it, the held piece went out with the
 		// start of its placeholder as it was, the next piece with the
@@ -256,35 +291,28 @@ func (rw *Writer) event(ev []byte) error {
 		_, err := rw.w.Write(rebuild(pre, restoreJSON(data, rw.count()), post))
 		return err
 	}
-	ctx := name + "|" + eventCtx(data)
 	var texts *pieces // read once, if this event goes on with a text or holds one
 	// the starts of placeholders the last event ended in go on here, each
 	// on the string of the text it was cut from
-	var carry map[string]string
+	var carry map[int]string
 	if p := rw.pending; p != nil {
-		var on map[string]bool
+		var used []bool
 		if p.ctx == ctx {
-			texts = piecesOf(data)
-			for path, t := range texts.on(p.tails) {
-				if carry == nil {
-					carry, on = map[string]string{}, map[string]bool{}
-				}
-				carry[path] = p.tails[t]
-				on[t] = true
-			}
+			texts = piecesOf(data, typ)
+			carry, used = texts.on(p.tails)
 		}
-		if _, err := rw.w.Write(p.out(on)); err != nil {
+		if _, err := rw.w.Write(p.out(used)); err != nil {
 			return err
 		}
 		rw.pending = nil
 	}
-	typ := typeOf(data)
-	if typ == "" {
-		typ = name
-	}
-	var tails, text, cuts map[string]string
+	var tails []heldTail
+	var seenTail map[string]bool
+	idx := 0
 	restored, _ := walk(data, func(path, key, s string) string {
-		if c, ok := carry[path]; ok {
+		i := idx
+		idx++
+		if c, ok := carry[i]; ok {
 			s = c + s
 		}
 		if sealedText(key, s) {
@@ -296,18 +324,23 @@ func (rw *Writer) event(ev []byte) error {
 		if !kept[key] && key != "obfuscation" {
 			if n := partialTail(s); n > 0 {
 				if texts == nil {
-					texts = piecesOf(data)
+					texts = piecesOf(data, typ)
 				}
 				// a string that is whole, or the last piece of its
 				// text, goes out whole: nothing of the next event is
 				// its own; so does a second string of one text
-				if t, _, more := texts.of(path); more && tails[t] == "" {
-					if tails == nil {
-						tails, text, cuts = map[string]string{}, map[string]string{}, map[string]string{}
+				if tkey, altIDs, _, more := texts.of(i); more && !seenTail[tkey] {
+					if seenTail == nil {
+						seenTail = map[string]bool{}
 					}
-					tails[t] = s[len(s)-n:]
-					text[path] = t
-					cuts[path] = Restore(s[:len(s)-n], asJSON(key, typ))
+					seenTail[tkey] = true
+					tails = append(tails, heldTail{
+						key:    tkey,
+						altIDs: altIDs,
+						tail:   s[len(s)-n:],
+						ord:    i,
+						cut:    Restore(s[:len(s)-n], asJSON(key, typ)),
+					})
 				}
 			}
 		}
@@ -316,11 +349,11 @@ func (rw *Writer) event(ev []byte) error {
 		return restore(s, asJSON(key, typ), rw.count())
 	})
 	full := rebuild(pre, restored, post)
-	if tails == nil {
+	if len(tails) == 0 {
 		_, err := rw.w.Write(full)
 		return err
 	}
-	rw.pending = &held{ctx: ctx, tails: tails, text: text, cuts: cuts, full: full, pre: pre, post: post, data: restored}
+	rw.pending = &held{ctx: ctx, tails: tails, full: full, pre: pre, post: post, data: restored}
 	return nil
 }
 
@@ -330,15 +363,6 @@ func (rw *Writer) event(ev []byte) error {
 // keepalive, and response.in_progress and response.queued, magpie's
 // keepalive on that protocol.
 var waitEvents = []string{"ping", "keepalive", "response.in_progress", "response.queued"}
-
-// waiting says an event of name with data is one of waitEvents.
-func waiting(name string, data []byte) bool {
-	typ := typeOf(data)
-	if typ == "" {
-		typ = name
-	}
-	return slices.Contains(waitEvents, typ)
-}
 
 // sealedText says a string of a vendor's answer goes on as it came: what the
 // vendor sealed (signatureKeys) and a file's encoded data.
@@ -377,8 +401,14 @@ func splitEvent(ev []byte) (name string, data, pre, post []byte, ok bool) {
 	for i, l := range lines {
 		t := bytes.TrimRight(l, "\r\n")
 		switch {
+		case bytes.Equal(t, []byte("event")):
+			name = ""
 		case bytes.HasPrefix(t, []byte("event:")):
-			name = strings.TrimSpace(string(t[6:]))
+			v := t[6:]
+			if len(v) > 0 && v[0] == ' ' {
+				v = v[1:]
+			}
+			name = string(v)
 		case bytes.HasPrefix(t, []byte("data:")):
 			if at >= 0 {
 				return "", nil, nil, nil, false // data over more than one line
@@ -405,24 +435,320 @@ func splitEvent(ev []byte) (name string, data, pre, post []byte, ok bool) {
 	return name, d, ev[:off+start], ev[off+len(t):], true
 }
 
-// eventCtx is what says which text an event goes on with.
-func eventCtx(data []byte) string {
-	var b strings.Builder
-	walk(data, func(path, _, s string) string {
-		switch path {
-		case "type", "item_id":
-			b.WriteString(path + "=" + s + ";")
+// rawSlice borrows the raw JSON bytes of a top-level value during Unmarshal
+// without copying large nested payloads (such as a 2 MB partial_image_b64).
+type rawSlice []byte
+
+func (r *rawSlice) UnmarshalJSON(b []byte) error {
+	*r = b
+	return nil
+}
+
+// normNum puts a valid JSON number into a canonical decimal-exponent form
+// (e.g. 1, 1.0, 1e0, 0.00...01e65 -> "1"; -0.0, 0e99999999999999999999 -> "0")
+// in O(len(s)).
+func normNum(s string) string {
+	neg := false
+	rest := s
+	if strings.HasPrefix(rest, "-") {
+		neg = true
+		rest = rest[1:]
+	}
+	mant, expStr, hasExp := rest, "", false
+	if i := strings.IndexAny(rest, "eE"); i >= 0 {
+		mant, expStr, hasExp = rest[:i], rest[i+1:], true
+	}
+	intPart, fracPart, hasDot := strings.Cut(mant, ".")
+	digits := intPart
+	if hasDot {
+		digits = intPart + fracPart
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return "0"
+	}
+	var exp int64
+	if hasExp {
+		var err error
+		exp, err = strconv.ParseInt(expStr, 10, 64)
+		if err != nil {
+			return s
 		}
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	scaleShift := int64(len(digits)-len(trimmed)) - int64(len(fracPart))
+	// guard int64 addition against overflow on extreme exponents
+	if (scaleShift > 0 && exp > (1<<62)-scaleShift) || (scaleShift < 0 && exp < -(1<<62)-scaleShift) {
 		return s
-	})
-	for _, k := range []string{`"index":`, `"output_index":`, `"content_index":`} {
-		if i := bytes.Index(data, []byte(k)); i >= 0 {
-			j := i + len(k)
-			e := j
-			for e < len(data) && (data[e] >= '0' && data[e] <= '9' || data[e] == ' ') {
-				e++
+	}
+	scale := exp + scaleShift
+	var b strings.Builder
+	if neg {
+		b.WriteByte('-')
+	}
+	b.WriteString(trimmed)
+	if scale != 0 {
+		b.WriteByte('e')
+		b.WriteString(strconv.FormatInt(scale, 10))
+	}
+	return b.String()
+}
+
+func rawScalar(raw rawSlice) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	switch raw[0] {
+	case '"':
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return "s:" + s
+		}
+	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return "n:" + normNum(string(raw))
+	}
+	return ""
+}
+
+// topFields reads an event's effective type and top-level context (exact
+// case-sensitive depth-1 keys only, never nested choice or candidate indices).
+// Per SSE, an omitted event: line and "event: message" are the same default
+// event; all other explicit event names stay distinct. ok is false if data
+// isn't valid JSON.
+func topFields(name string, data []byte) (typ, ctx string, ok bool) {
+	var top map[string]rawSlice
+	if data[0] == '[' {
+		if !json.Valid(data) {
+			return "", "", false
+		}
+	} else if json.Unmarshal(data, &top) != nil {
+		return "", "", false
+	}
+	var bodyType string
+	if raw := top["type"]; len(raw) > 0 && raw[0] == '"' {
+		_ = json.Unmarshal(raw, &bodyType)
+	}
+	typ = bodyType
+	if typ == "" && name != "message" {
+		typ = name
+	}
+	sseName := name
+	if sseName == "message" {
+		sseName = ""
+	}
+	var b strings.Builder
+	b.WriteString(strconv.Quote(sseName))
+	for _, k := range []string{"type", "item_id", "index", "output_index", "content_index", "summary_index", "command_index"} {
+		s := rawScalar(top[k])
+		if s == "" || (k == "summary_index" || k == "command_index") && s == "n:0" {
+			continue
+		}
+		b.WriteByte('\x00')
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(strconv.Quote(s))
+	}
+	return typ, b.String(), true
+}
+
+var wholeResponsesEvents = map[string]bool{
+	"response.created":                             true,
+	"response.in_progress":                         true,
+	"response.completed":                           true,
+	"response.failed":                              true,
+	"response.incomplete":                          true,
+	"response.queued":                              true,
+	"response.output_item.added":                   true,
+	"response.output_item.done":                    true,
+	"response.content_part.added":                  true,
+	"response.content_part.done":                   true,
+	"response.output_text.done":                    true,
+	"response.output_text.annotation.added":        true,
+	"response.refusal.done":                        true,
+	"response.function_call_arguments.done":        true,
+	"response.file_search_call.in_progress":        true,
+	"response.file_search_call.searching":          true,
+	"response.file_search_call.completed":          true,
+	"response.web_search_call.in_progress":         true,
+	"response.web_search_call.searching":           true,
+	"response.web_search_call.completed":           true,
+	"response.reasoning_summary_part.added":        true,
+	"response.reasoning_summary_part.done":         true,
+	"response.reasoning_summary_text.done":         true,
+	"response.reasoning_text.done":                 true,
+	"response.image_generation_call.in_progress":   true,
+	"response.image_generation_call.generating":    true,
+	"response.image_generation_call.partial_image": true,
+	"response.image_generation_call.completed":     true,
+	"response.mcp_call.in_progress":                true,
+	"response.mcp_call.completed":                  true,
+	"response.mcp_call.failed":                     true,
+	"response.mcp_call_arguments.done":             true,
+	"response.mcp_list_tools.in_progress":          true,
+	"response.mcp_list_tools.completed":            true,
+	"response.mcp_list_tools.failed":               true,
+	"response.code_interpreter_call.in_progress":   true,
+	"response.code_interpreter_call.interpreting":  true,
+	"response.code_interpreter_call.completed":     true,
+	"response.code_interpreter_call_code.done":     true,
+	"response.custom_tool_call_input.done":         true,
+	"response.audio.done":                          true,
+	"response.audio.transcript.done":               true,
+	"response.output_audio.done":                   true,
+	"response.output_audio_transcript.done":        true,
+	"response.shell_call_output_content.done":      true,
+}
+
+// wholeField says the string at steps sits in a known complete (non-streamed)
+// protocol field so its trailing letters never carry onto the next event:
+// Gemini finishReason ("STOP" with a "public-ip-" stand-in went out as "STO"
+// and "PSTOP"), safetyRatings, groundingMetadata, promptFeedback,
+// usageMetadata, Chat system_fingerprint/logprobs/message/annotations,
+// Anthropic citations and lifecycle events, and non-delta or audio Responses
+// events. Unknown events, proxy extensions, object keys shaped like array
+// indices, empty parent keys and literal dotted keys keep streaming normally.
+func wholeField(event string, steps []pathStep) bool {
+	if len(steps) == 0 {
+		return false
+	}
+	if strings.HasPrefix(event, "response.") {
+		switch event {
+		case "response.audio.delta", "response.output_audio.delta":
+			if len(steps) == 1 && !steps[0].arr && steps[0].key == "delta" {
+				return true
 			}
-			b.WriteString(k + string(data[j:e]) + ";")
+		case "response.output_text.delta":
+			if !steps[0].arr && steps[0].key == "logprobs" {
+				return true
+			}
+		default:
+			if wholeResponsesEvents[event] {
+				return true
+			}
+		}
+	}
+	switch event {
+	case "message_start":
+		if !steps[0].arr && steps[0].key == "message" {
+			return true
+		}
+	case "message_delta":
+		if !steps[0].arr && (steps[0].key == "delta" || steps[0].key == "usage") {
+			return true
+		}
+	case "content_block_start":
+		if !steps[0].arr && steps[0].key == "content_block" {
+			return true
+		}
+	case "content_block_delta":
+		if len(steps) >= 3 && !steps[0].arr && steps[0].key == "delta" && !steps[1].arr && steps[1].key == "citation" {
+			return true
+		}
+	}
+	if len(steps) == 1 && !steps[0].arr && (steps[0].key == "system_fingerprint" || steps[0].key == "service_tier") {
+		return true
+	}
+	if len(steps) >= 4 && !steps[0].arr && steps[0].key == "choices" && steps[1].arr && !steps[2].arr {
+		switch steps[2].key {
+		case "logprobs", "message":
+			return true
+		case "delta":
+			if !steps[3].arr {
+				if steps[3].key == "annotations" && len(steps) >= 5 {
+					return true
+				}
+				if len(steps) == 6 && steps[3].key == "reasoning_details" && steps[4].arr && !steps[5].arr && steps[5].key == "format" {
+					return true
+				}
+			}
+		}
+	}
+	g := steps
+	if len(g) > 1 && !g[0].arr && g[0].key == "response" {
+		g = g[1:]
+	}
+	if len(g) == 1 && !g[0].arr {
+		switch g[0].key {
+		case "modelVersion", "model_version", "responseId", "response_id", "createTime", "create_time", "traceId", "trace_id":
+			return true
+		}
+	}
+	if len(g) >= 2 && !g[0].arr {
+		switch g[0].key {
+		case "promptFeedback", "prompt_feedback", "usageMetadata", "usage_metadata":
+			return true
+		}
+	}
+	if len(g) >= 3 && !g[0].arr && g[0].key == "candidates" && g[1].arr && !g[2].arr {
+		if len(g) == 3 {
+			switch g[2].key {
+			case "finishReason", "finishMessage", "finish_message", "continuationToken", "continuation_token":
+				return true
+			}
+		} else {
+			switch g[2].key {
+			case "safetyRatings", "safety_ratings",
+				"groundingMetadata", "grounding_metadata",
+				"citationMetadata", "citation_metadata",
+				"logprobsResult", "logprobs_result",
+				"urlContextMetadata", "url_context_metadata":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type objMeta struct {
+	index        string
+	jsonPath     string
+	id           string
+	thought      bool
+	willContinue bool
+}
+
+type pieceStr struct {
+	key   string
+	steps []pathStep
+}
+
+// textSeg is one typed segment of a string's stream identity, keeping object
+// keys separate from array elements and protocol identifiers so no JSON key
+// bytes can collide with internal markers.
+type textSeg struct {
+	kind    byte   // 'k' object key, 'a' array element
+	key     string // object key (for 'k'), or array slot (for 'a')
+	idKind  byte   // 0 none, '#' index, '@' jsonPath, '$' id
+	id      string // explicit index/jsonPath/id
+	thought bool   // Gemini part thought flag
+}
+
+func writeLenStr(b *strings.Builder, s string) {
+	b.WriteString(strconv.Itoa(len(s)))
+	b.WriteByte(':')
+	b.WriteString(s)
+}
+
+// segKey encodes a path of typed segments into an injective map key so O(N)
+// matching never collides on any JSON key bytes (dots, colons, control chars).
+// When an array element carries an explicit protocol identifier (index,
+// jsonPath, or id), its array slot is omitted so reordered or duplicate
+// entries compare by identity rather than position.
+func segKey(segs []textSeg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteByte(s.kind)
+		if s.kind != 'a' || s.idKind == 0 {
+			writeLenStr(&b, s.key)
+		} else {
+			b.WriteString("0:")
+		}
+		b.WriteByte(s.idKind)
+		writeLenStr(&b, s.id)
+		if s.thought {
+			b.WriteByte('1')
+		} else {
+			b.WriteByte('0')
 		}
 	}
 	return b.String()
@@ -433,8 +759,8 @@ func eventCtx(data []byte) string {
 // what the protocol names it by rather than where it stands: Chat
 // Completions' tool call by its index (the next call's first piece sits
 // where the last one's did, at tool_calls.0), Gemini's candidate by its
-// index, a streamed argument by its jsonPath, and a Gemini part as a
-// thought or not (the answer comes at parts.0.text after the thoughts).
+// index, a streamed argument by its jsonPath, and a Gemini part as a thought
+// or not (the answer comes at parts.0.text after the thoughts).
 // In a Gemini part only text is streamed in pieces, and a functionCall's
 // partialArgs value while willContinue says more of it is to come: a
 // functionCall's args, a functionResponse's response, code and its result
@@ -442,115 +768,213 @@ func eventCtx(data []byte) string {
 // is held for the next (#7837: the "d" of one read_file's "/tmp/foo1.md"
 // went to the start of the next one's Path).
 type pieces struct {
-	names map[string]string // the values of pieceNames' keys, by path
-	strs  []string          // the path of every string
+	event string
+	objs  map[int]*objMeta
+	strs  []pieceStr // every string's key and exact path steps, in walk order
 }
 
-// pieceNames are the keys an object in an array is named by (the first
-// of index, jsonPath and id it has), thought, which marks a Gemini part,
-// and willContinue, which says a partialArgs value goes on.
-var pieceNames = map[string]bool{"index": true, "jsonPath": true, "json_path": true, "id": true,
-	"thought": true, "willContinue": true, "will_continue": true}
-
-func piecesOf(data []byte) *pieces {
-	p := &pieces{names: map[string]string{}}
-	note := func(path, key, v string) {
-		if pieceNames[key] {
-			p.names[path] = v
+func normIndex(s string, bare bool) string {
+	if bare {
+		if s == "null" {
+			return "b:null"
+		}
+		if len(s) > 0 && (s[0] == '-' || s[0] >= '0' && s[0] <= '9') {
+			return "n:" + normNum(s)
+		}
+		return "b:" + s
+	}
+	if len(s) > 0 && (s[0] == '-' || s[0] >= '0' && s[0] <= '9') {
+		if json.Valid([]byte(s)) {
+			return "n:" + normNum(s)
 		}
 	}
-	w := walker{in: data, bare: note, fn: func(path, key, s string) string {
-		p.strs = append(p.strs, path)
-		note(path, key, s)
-		return s
-	}}
+	return "s:" + s
+}
+
+func altIDsConflict(prev, cur []string) bool {
+	if len(cur) == 0 {
+		return false
+	}
+	for i, cid := range cur {
+		if cid == "" {
+			continue
+		}
+		if i >= len(prev) || prev[i] != cid {
+			return true
+		}
+	}
+	return false
+}
+
+func piecesOf(data []byte, event string) *pieces {
+	p := &pieces{event: event}
+	meta := func(obj int) *objMeta {
+		if p.objs == nil {
+			p.objs = map[int]*objMeta{}
+		}
+		m := p.objs[obj]
+		if m == nil {
+			m = &objMeta{}
+			p.objs[obj] = m
+		}
+		return m
+	}
+	var w walker
+	w = walker{
+		in:    data,
+		track: true,
+		bare: func(_, key, raw string) {
+			n := len(w.steps)
+			if n < 2 || w.steps[n-1].arr || w.steps[n-2].obj == 0 {
+				return
+			}
+			obj := w.steps[n-2].obj
+			switch key {
+			case "index":
+				meta(obj).index = normIndex(raw, true)
+			case "id":
+				meta(obj).id = "b:" + raw
+			case "thought":
+				meta(obj).thought = raw == "true"
+			case "willContinue", "will_continue":
+				meta(obj).willContinue = raw == "true"
+			}
+		},
+		fn: func(_, key, s string) string {
+			p.strs = append(p.strs, pieceStr{key: key, steps: slices.Clone(w.steps)})
+			n := len(w.steps)
+			if n < 2 || w.steps[n-1].arr || w.steps[n-2].obj == 0 {
+				return s
+			}
+			obj := w.steps[n-2].obj
+			switch key {
+			case "index":
+				meta(obj).index = normIndex(s, false)
+			case "jsonPath", "json_path":
+				meta(obj).jsonPath = "p:" + s
+			case "id":
+				meta(obj).id = "s:" + s
+			}
+			return s
+		},
+	}
 	w.value(w.ws(0), "", "")
 	return p
 }
 
-// of is the text the string at path is a piece of; piece says it goes on
-// with what the text had in an event before, and more that the next
-// event may go on with it.
-func (p *pieces) of(path string) (text string, piece, more bool) {
-	segs := strings.Split(path, ".")
-	var b strings.Builder
+// of returns the canonical text key of the ord-th string in walk order, any
+// secondary explicit ids along indexed array segments (so two calls sharing
+// index:0 with different explicit ids never collide, while a follow-up chunk
+// omitting id still matches), piece (continues a prior event), and more (the
+// next event may continue it).
+func (p *pieces) of(ord int) (key string, altIDs []string, piece, more bool) {
+	if ord < 0 || ord >= len(p.strs) {
+		return "", nil, false, false
+	}
+	steps := p.strs[ord].steps
+	if wholeField(p.event, steps) {
+		return "", nil, false, false
+	}
+	segs := make([]textSeg, len(steps))
 	part := -1 // where a Gemini part's own keys start
-	for i, s := range segs {
-		at := strings.Join(segs[:i+1], ".")
-		if i < len(segs)-1 && isIndexSeg(s) { // an object in an array
-			switch {
-			case p.has(at, "index"):
-				s = "#" + p.names[at+".index"]
-			case p.has(at, "jsonPath"), p.has(at, "json_path"):
-				s = "@" + p.names[at+".jsonPath"] + p.names[at+".json_path"]
-			case p.has(at, "id"):
-				s = "$" + p.names[at+".id"]
+	for i, st := range steps {
+		isLeaf := i == len(steps)-1
+		if st.arr {
+			seg := textSeg{kind: 'a', key: st.key}
+			if !isLeaf {
+				if m := p.objs[st.obj]; m != nil {
+					switch {
+					case m.index != "":
+						seg.idKind, seg.id = '#', m.index
+						if m.index != "b:null" && m.id != "" && m.id != "s:" && m.id != "b:null" {
+							if altIDs == nil {
+								altIDs = make([]string, len(steps))
+							}
+							altIDs[i] = m.id
+						}
+					case m.jsonPath != "":
+						seg.idKind, seg.id = '@', m.jsonPath
+					case m.id != "":
+						seg.idKind, seg.id = '$', m.id
+					}
+					seg.thought = m.thought
+				}
+				if part < 0 && i > 0 && !steps[i-1].arr && steps[i-1].key == "parts" {
+					part = i + 1
+				}
 			}
-			if p.names[at+".thought"] == "true" {
-				s += "+thought"
+			segs[i] = seg
+		} else {
+			seg := textSeg{kind: 'k', key: st.key}
+			if !isLeaf {
+				if m := p.objs[st.obj]; m != nil {
+					if m.index != "" {
+						seg.idKind, seg.id = '#', m.index
+					}
+					if m.id != "" && m.id != "s:" && m.id != "b:null" {
+						if altIDs == nil {
+							altIDs = make([]string, len(steps))
+						}
+						altIDs[i] = m.id
+					}
+				}
 			}
-			if i > 0 && segs[i-1] == "parts" {
-				part = i + 1
-			}
+			segs[i] = seg
 		}
-		if i > 0 {
-			b.WriteByte('.')
-		}
-		b.WriteString(s)
 	}
-	text = b.String()
+	key = segKey(segs)
 	if part < 0 {
-		return text, true, true
+		return key, altIDs, true, true
 	}
-	own := segs[part:]
+	own := steps[part:]
 	switch {
-	case len(own) == 1 && own[0] == "text":
-		return text, true, true
-	case len(own) == 4 && (own[0] == "functionCall" || own[0] == "function_call") &&
-		(own[1] == "partialArgs" || own[1] == "partial_args") && isIndexSeg(own[2]) &&
-		(own[3] == "stringValue" || own[3] == "string_value"):
-		at := strings.Join(segs[:part+3], ".")
-		return text, true, p.names[at+".willContinue"] == "true" || p.names[at+".will_continue"] == "true"
+	case len(own) == 1 && !own[0].arr && own[0].key == "text":
+		return key, altIDs, true, true
+	case len(own) == 4 && !own[0].arr && (own[0].key == "functionCall" || own[0].key == "function_call") &&
+		!own[1].arr && (own[1].key == "partialArgs" || own[1].key == "partial_args") && own[2].arr &&
+		!own[3].arr && (own[3].key == "stringValue" || own[3].key == "string_value"):
+		m := p.objs[own[2].obj]
+		return key, altIDs, true, m != nil && m.willContinue
 	}
-	return text, false, false
+	return key, nil, false, false
 }
 
-func (p *pieces) has(at, key string) bool {
-	_, ok := p.names[at+"."+key]
-	return ok
-}
-
-// on is, for each text of tails this event goes on with, the path of its
-// string here. A text two strings here could go on with goes on with
-// neither.
-func (p *pieces) on(tails map[string]string) map[string]string {
-	at := map[string]string{}
-	n := map[string]int{}
-	for _, path := range p.strs {
-		if t, piece, _ := p.of(path); piece {
-			if _, ok := tails[t]; ok {
-				at[t] = path
-				n[t]++
+// on matches each held tail to the unique string in this event (by walk
+// ordinal) that continues it in O(N). A text two strings here could go on with
+// goes on with neither.
+func (p *pieces) on(tails []heldTail) (map[int]string, []bool) {
+	type hit struct {
+		ord    int
+		altIDs []string
+	}
+	exact := map[string]hit{}
+	exactHits := map[string]int{}
+	for i, s := range p.strs {
+		if kept[s.key] || s.key == "obfuscation" {
+			continue
+		}
+		key, altIDs, piece, _ := p.of(i)
+		if !piece {
+			continue
+		}
+		exact[key] = hit{ord: i, altIDs: altIDs}
+		exactHits[key]++
+	}
+	var carry map[int]string
+	var used []bool
+	for ti, ht := range tails {
+		if exactHits[ht.key] == 1 {
+			h := exact[ht.key]
+			if altIDsConflict(ht.altIDs, h.altIDs) {
+				continue
 			}
+			if carry == nil {
+				carry = map[int]string{}
+				used = make([]bool, len(tails))
+			}
+			carry[h.ord] = ht.tail
+			used[ti] = true
 		}
 	}
-	out := map[string]string{}
-	for t, path := range at {
-		if n[t] == 1 {
-			out[path] = t
-		}
-	}
-	return out
-}
-
-func isIndexSeg(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return carry, used
 }
