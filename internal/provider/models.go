@@ -3104,11 +3104,19 @@ func BasePriceIn(s settings.Settings, providerID, model string) (catalog.Price, 
 // on X), else the provider's. An empty keyID, or one the provider doesn't
 // rate apart, is BasePriceIn.
 func BaseKeyPriceIn(s settings.Settings, providerID, keyID, model string) (catalog.Price, bool, []RateWindow) {
+	return BaseCallPriceIn(s, providerID, keyID, model, false)
+}
+
+// BaseCallPriceIn is BaseKeyPriceIn with the route known from the call's
+// own session log. An agy log takes Antigravity's list prices even when
+// the billing provider is unknown.
+func BaseCallPriceIn(s settings.Settings, providerID, keyID, model string, agySession bool) (catalog.Price, bool, []RateWindow) {
 	p, known := byIDOrWas(providerID)
 	if !known {
 		p = Provider{ID: providerID}
 	}
-	pr, ok := priceOf(s, p.atKeyRate(keyID), known, model, time.Time{})
+	p.agySession = agySession
+	pr, ok := tariffOf(s, p.atKeyRate(keyID), known, model)
 	return pr, ok, p.RateWindows
 }
 

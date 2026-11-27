@@ -645,6 +645,8 @@ type Provider struct {
 	// zeroRate marks a PriceRate of 0 that is a rate, a free group's, not
 	// the price as listed; set by atKeyRate alone
 	zeroRate bool
+	// agySession marks a price lookup for the agy CLI's or app's local log.
+	agySession bool
 
 	// BalanceURL, when set, is where the vendor tells what is left on a
 	// key, asked with the key the way a chat request carries it; BalancePath

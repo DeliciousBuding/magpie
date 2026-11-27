@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Antigravity local-session calls recorded under its Orchestrator role
@@ -81,6 +83,62 @@ func TestAntigravityOrchestratorCallsPriced(t *testing.T) {
 	_, agy, _ := Ledger(Month, Filter{Agent: "agy"})
 	if g := agyCost; agy.Unpriced != 0 || !near(agy.Cost, g) {
 		t.Errorf("agy: cost %v unpriced %d, want %v and 0", agy.Cost, agy.Unpriced, g)
+	}
+}
+
+func TestAgyUsagePrices(t *testing.T) {
+	pageHome(t)
+	const carbon, argon = "gemini-4-carbon", "gemini-4-argon"
+	if err := os.WriteFile(catalog.CachePath(), []byte(`{"google":{"id":"google","models":{
+		"gemini-4-carbon":{"id":"gemini-4-carbon","cost":{"input":2}},
+		"gemini-4-argon":{"id":"gemini-4-argon","cost":{"input":2}}}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	s := settings.Settings{ModelPrices: map[string]settings.ModelPrice{
+		provider.AnyPriceKey(carbon):  settings.StatedPrice(catalog.Price{Input: 1}),
+		UnknownProvider + "/" + argon: settings.StatedPrice(catalog.Price{}),
+	}}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	key := provider.KeyID("test-key")
+	if err := provider.Save(provider.Provider{ID: UnknownProvider, Name: "Local", Key: "test-key", Chat: "https://local.example/v1",
+		PriceRate: 0.5, KeyPriceRates: map[string]float64{key: 0.25},
+		RateWindows: []provider.RateWindow{{Start: "09:00", End: "12:00", Rate: 3}}}); err != nil {
+		t.Fatal(err)
+	}
+	now := holdClock(t, time.Date(2026, 11, 19, 16, 0, 0, 0, time.Local))
+	price := Pricer()
+	var wantTotal float64
+	for _, tc := range []struct {
+		model, key string
+		hour       int
+		want       float64
+	}{
+		{carbon, key, 14, 1}, {carbon, key, 10, 3}, {argon, "", 13, 0},
+		// No explicit price on the effort alias: $4 original, then the rate.
+		{carbon + "-high", "", 15, 2}, {carbon + "-high", key, 11, 3},
+	} {
+		r := Record{Time: now.Add(time.Duration(tc.hour-16) * time.Hour), Agent: "agy", Provider: UnknownProvider,
+			ProviderKeyID: tc.key, Model: tc.model, Input: 1e6, Status: 200}
+		if tc.model == carbon || tc.model == argon {
+			if ref, ok := provider.EffectivePriceAt(s, r.Provider, r.Model, r.Time); !ok || ref.Input != tc.want {
+				t.Fatalf("provider price for %s at %d = %v (%v), want %v", r.Model, tc.hour, ref.Input, ok, tc.want)
+			}
+		}
+		if pr := price(r); pr == nil {
+			t.Errorf("%s at %d: no price", r.Model, tc.hour)
+		} else if pr.Input != tc.want {
+			t.Errorf("%s at %d: $%v, want $%v", r.Model, tc.hour, pr.Input, tc.want)
+		}
+		Append(r)
+		wantTotal += tc.want
+	}
+	_, ledger, _ := Ledger(Month, Filter{})
+	summary := Summarize(Month)
+	if ledger.Cost != wantTotal || ledger.Unpriced != 0 || summary.Cost != wantTotal || summary.Unpriced != 0 {
+		t.Errorf("ledger $%v (%d unpriced), summary $%v (%d unpriced), want $%v (0 unpriced)", ledger.Cost, ledger.Unpriced, summary.Cost, summary.Unpriced, wantTotal)
 	}
 }
 

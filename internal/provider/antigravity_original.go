@@ -76,7 +76,7 @@ func AgyPriced(model string, pr catalog.Price) catalog.Price { return atLeastOri
 // servedByAntigravity is whether p is an Antigravity route: the built-in's
 // accounts, or the agy-cli plugin's.
 func (p Provider) servedByAntigravity() bool {
-	return p.ID == "antigravity" || p.ID == agyCLIID ||
+	return p.agySession || p.ID == "antigravity" || p.ID == agyCLIID ||
 		p.Account != nil && p.Account.Agent == "antigravity" ||
 		p.PluginProvider() == "antigravity" || p.PluginProvider() == agyCLIID
 }

@@ -716,6 +716,9 @@ func basePriceIn(s settings.Settings, wires map[string]string, a priceAsk) (*cat
 	var v catalog.Price
 	var ws []provider.RateWindow
 	var ok bool
+	base := func(model string) (catalog.Price, bool, []provider.RateWindow) {
+		return provider.BaseCallPriceIn(s, a.ID, a.Key, model, a.Agy)
+	}
 	if a.Unknown {
 		// a call Kimi Code made on its own sign-in, its model as its
 		// session file names it ("kimi-code/k3-256k", #3331): a price the
@@ -738,15 +741,15 @@ func basePriceIn(s settings.Settings, wires map[string]string, a priceAsk) (*cat
 		if v, ok, ws = provider.UserBasePriceIn(s, a.ID, a.Model); !ok {
 			// the model that ran is priced as itself, what the vendor
 			// billed; with none, the asked-for one's price stands
-			if v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Served); !ok {
-				v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Model)
+			if v, ok, ws = base(a.Served); !ok {
+				v, ok, ws = base(a.Model)
 			}
 		}
 	} else {
-		v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Model)
+		v, ok, ws = base(a.Model)
 	}
 	if !ok && a.Served != "" {
-		v, ok, ws = provider.BaseKeyPriceIn(s, a.ID, a.Key, a.Served)
+		v, ok, ws = base(a.Served)
 	}
 	if ok {
 		pr = &v
@@ -762,15 +765,14 @@ func basePriceIn(s settings.Settings, wires map[string]string, a priceAsk) (*cat
 		// price are none: the row stays unpriced, its CSV cost empty,
 		// rather than priced at another entry's guess.
 		if v, ok := catalog.PriceOf(a.SessionProvider, a.Model); ok {
+			if a.Agy {
+				v = provider.AgyPriced(a.Model, v)
+			}
 			pr = &v
 			// the failed lookup's windows are the billing provider's,
 			// not the session provider's: none holds for this price
 			ws = nil
 		}
-	}
-	if pr != nil && a.Agy {
-		v := provider.AgyPriced(a.Model, *pr)
-		pr = &v
 	}
 	return pr, ws
 }
