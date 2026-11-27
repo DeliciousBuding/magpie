@@ -77,6 +77,10 @@ func geminiKept(u string) bool {
 	return j > 0
 }
 
+// GeminiModelID takes the model id out of a Google models/ resource name.
+// A publisher in the id (google/gemma-…, for example) is part of its name.
+func GeminiModelID(model string) string { return strings.TrimPrefix(model, "models/") }
+
 // GeminiModelPath is model as every Gemini and Vertex AI path names it
 // after models/: each slash-separated segment escaped and the slashes
 // kept, so a relay's namespaced id (example/model-demo) is asked at
@@ -89,7 +93,7 @@ func geminiKept(u string) bool {
 // it, since the path already has one: drawn at models/models/… the
 // Gemini API answered 404 (Dani Ariyanto on Discord, Nano Banana 2.1).
 func GeminiModelPath(model string) string {
-	model = strings.TrimPrefix(model, "models/")
+	model = GeminiModelID(model)
 	segs := strings.Split(model, "/")
 	for i, s := range segs {
 		if s == "" || s == "." || s == ".." {

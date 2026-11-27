@@ -245,10 +245,9 @@ func VertexPath(model string) string {
 // models (Model as a Service: DeepSeek, GLM, gpt-oss, Gemma, Llama…),
 // which Google serves on its OpenAI-compatible chat completions at the
 // project (Base(Chat), …/endpoints/openapi) under a publisher/model id
-// such as deepseek-ai/deepseek-v4.1-flash-maas. Every such id models.dev
-// lists for google-vertex has the publisher before a slash, and no Gemini
-// id on generateContent has one, so the slash is what tells them apart.
-func VertexPartner(model string) bool { return strings.Contains(model, "/") }
+// such as deepseek-ai/deepseek-v4.1-flash-maas. The models/ in a Google
+// resource name is not a publisher.
+func VertexPartner(model string) bool { return strings.Contains(GeminiModelID(model), "/") }
 
 // VertexClaude is whether model is one of Anthropic's Claude models on
 // Vertex AI (claude-opus-5-5, claude-sonnet-4-5@20250929), which Google
@@ -258,7 +257,7 @@ func VertexPartner(model string) bool { return strings.Contains(model, "/") }
 // model's: no Gemini id starts so, and Claude's ids have no publisher
 // before a slash.
 func VertexClaude(model string) bool {
-	return !VertexPartner(model) && strings.HasPrefix(strings.ToLower(model), "claude-")
+	return !VertexPartner(model) && strings.HasPrefix(strings.ToLower(GeminiModelID(model)), "claude-")
 }
 
 // vertexAnthropicVersion is the Messages API's version a Claude request
@@ -292,6 +291,9 @@ func VertexClaudeRequest(path string, body []byte) (string, []byte, bool) {
 	at := "/publishers/anthropic/models/"
 	if p, _, _ := strings.Cut(path, "?"); strings.HasSuffix(p, "/count_tokens") {
 		at += "count-tokens:rawPredict"
+		if id := GeminiModelID(model); id != model {
+			m["model"], _ = json.Marshal(id)
+		}
 	} else {
 		var stream bool
 		_ = json.Unmarshal(m["stream"], &stream)
@@ -335,7 +337,7 @@ func VertexWholePath(model string) string {
 // which it can't go under; 2.5's Flash none).
 func vertexTest(q Provider, model string) (string, string) {
 	think := `"thinkingConfig":{"thinkingLevel":"low"},`
-	switch m := strings.ToLower(model); {
+	switch m := strings.ToLower(GeminiModelID(model)); {
 	case strings.HasPrefix(m, "gemini-2.5-pro"):
 		think = `"thinkingConfig":{"thinkingBudget":128},`
 	case strings.HasPrefix(m, "gemini-2.5"):
@@ -343,7 +345,7 @@ func vertexTest(q Provider, model string) (string, string) {
 	case vertexGeneration(m) < 3:
 		think = ""
 	}
-	return q.Base(Gemini) + "/publishers/google/models/" + GeminiModelPath(model) + ":generateContent",
+	return q.Base(Gemini) + VertexWholePath(model),
 		`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{` + think + `"maxOutputTokens":16}}`
 }
 

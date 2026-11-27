@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+
+	"github.com/yetone/magpie/internal/provider"
 )
 
 // ---- Google Vertex AI (provider side) ----------------------------------------
@@ -36,7 +38,7 @@ import (
 // buildVertex is a streamGenerateContent body for Vertex AI, which names the
 // model in its path and has none in here.
 func buildVertex(r *Request, model string) ([]byte, error) {
-	req, err := geminiRequest(r, model, "vertex")
+	req, err := geminiRequest(r, provider.GeminiModelID(model), "vertex")
 	if err != nil {
 		return nil, err
 	}

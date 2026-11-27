@@ -810,6 +810,22 @@ func TestVertexThinkingRange(t *testing.T) {
 	}
 }
 
+func TestVertexGeminiResourceName(t *testing.T) {
+	v := &vertexUp{}
+	s := vertexServe(t, v, vertexLevels)
+	const model = "google-vertex/models/gemini-2.5-pro"
+	const at = "/v1/projects/proj-1/locations/global/publishers/google/models/gemini-2.5-pro"
+	vertexAsk(t, s, "/v1/chat/completions", `{"model":"`+model+`","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`)
+	a := v.last(t)
+	if a.path != at+":streamGenerateContent" || a.query != "alt=sse" || thinkingOf(a)["thinkingBudget"] == nil {
+		t.Errorf("chat asked at %s?%s with thinking %v", a.path, a.query, thinkingOf(a))
+	}
+	vertexAsk(t, s, "/v1beta/models/"+model+":generateContent", `{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	if a := v.last(t); a.path != at+":generateContent" || a.query != "" {
+		t.Errorf("whole Gemini request went to %s?%s", a.path, a.query)
+	}
+}
+
 // The name a user gave a Vertex AI model upstream is the one in the path
 // it is asked at, from every API, and the one the usage log names.
 func TestVertexUpstreamName(t *testing.T) {

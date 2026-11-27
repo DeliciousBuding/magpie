@@ -302,6 +302,27 @@ func jwtOf(t *testing.T, jwt string, pub *rsa.PublicKey) (head, claims map[strin
 	return head, claims
 }
 
+func TestVertexModelResourceName(t *testing.T) {
+	vertexHome(t)
+	p := vertexAt("global", "")
+	for _, c := range []struct {
+		model string
+		api   Protocol
+	}{
+		{"models/gemini-2.5-pro", Gemini},
+		{"deepseek-ai/deepseek-v4.1-flash-maas", Chat},
+		{"meta/llama-3.3-70b-instruct-maas", Chat},
+		{"google/gemma-3-27b-it", Chat},
+	} {
+		if got := VertexPartner(c.model); got != (c.api == Chat) {
+			t.Errorf("VertexPartner(%q) = %v", c.model, got)
+		}
+		if got := p.APIs(c.model); !slices.Equal(got, []Protocol{c.api}) {
+			t.Errorf("APIs(%q) = %v, want [%s]", c.model, got, c.api)
+		}
+	}
+}
+
 // Each location is asked at a host of its own: global at
 // aiplatform.googleapis.com, the us and eu multi-regions at their rep
 // hosts, a region at its own. A project or location no address can be made
@@ -1496,6 +1517,7 @@ func TestVertexTestRequest(t *testing.T) {
 		"gemini-4-neon":          low,
 		"gemini-3-flash-preview": low,
 		"gemini-2.5-pro":         budget(128),
+		"models/gemini-2.5-pro":  budget(128),
 		"Gemini-2.5-Pro":         budget(128),
 		"gemini-2.5-flash":       budget(0),
 		"gemini-2.5-flash-lite":  budget(0),
@@ -1503,7 +1525,7 @@ func TestVertexTestRequest(t *testing.T) {
 		"gemini-flash-latest":    nil,
 	} {
 		u, body := vertexTest(q, model)
-		if u != base+"/publishers/google/models/"+model+":generateContent" {
+		if u != base+"/publishers/google/models/"+strings.TrimPrefix(model, "models/")+":generateContent" {
 			t.Errorf("%s asked at %s", model, u)
 		}
 		var b struct {
@@ -1761,7 +1783,7 @@ func TestVertexClaudeModels(t *testing.T) {
 			t.Errorf("%s not listed at global: %v", m, listed)
 		}
 	}
-	for _, m := range []string{"claude-sonnet-5-5", "claude-sonnet-4-5@20250929", "Claude-Opus-4-1@20250805"} {
+	for _, m := range []string{"claude-sonnet-5-5", "models/claude-sonnet-5-5", "claude-sonnet-4-5@20250929", "Claude-Opus-4-1@20250805"} {
 		if apis := p.APIs(m); !slices.Equal(apis, []Protocol{Anthropic}) {
 			t.Errorf("%s asked on %v", m, apis)
 		}
@@ -1812,6 +1834,9 @@ func TestVertexClaudeRequest(t *testing.T) {
 			"/publishers/anthropic/models/claude-haiku-5-5:rawPredict",
 			`{"anthropic_version":"vertex-2099-01-01"}`},
 		{"/v1/messages/count_tokens?beta=true", `{"model":"claude-opus-5-5","messages":[]}`,
+			"/publishers/anthropic/models/count-tokens:rawPredict",
+			`{"anthropic_version":"vertex-2023-10-16","messages":[],"model":"claude-opus-5-5"}`},
+		{"/v1/messages/count_tokens", `{"model":"models/claude-opus-5-5","messages":[]}`,
 			"/publishers/anthropic/models/count-tokens:rawPredict",
 			`{"anthropic_version":"vertex-2023-10-16","messages":[],"model":"claude-opus-5-5"}`},
 	} {
