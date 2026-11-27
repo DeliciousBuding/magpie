@@ -18,6 +18,14 @@ func TestGeminiBase(t *testing.T) {
 		"https://generativelanguage.googleapis.com/":                                                           "https://generativelanguage.googleapis.com/v1beta",
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse": "https://generativelanguage.googleapis.com/v1beta",
 		"https://relay.example/proxy/v1beta/models":                                                            "https://relay.example/proxy/v1beta",
+		"https://relay.example/v1beta/models/gemini-2.5-pro":                                                   "https://relay.example/v1beta",
+		"https://relay.example/v1beta/models/google/gemini-2.5-pro:generateContent":                            "https://relay.example/v1beta",
+		"https://relay.example/v1beta/models/openrouter/google/gemini-3-flash:streamGenerateContent?alt=sse":   "https://relay.example/v1beta",
+		"https://relay.example/v1beta/models/publishers/google/models/gemini-2.5-pro:generateContent":          "https://relay.example/v1beta",
+		"https://relay.example/models/proxy/v1beta":                                                            "https://relay.example/models/proxy/v1beta",
+		"https://relay.example/models/proxy/v1beta/models/google/gemini-2.5-pro:generateContent":               "https://relay.example/models/proxy/v1beta",
+		"https://models/proxy//v1beta/models/org/model:generateContent":                                        "https://models/proxy//v1beta",
+		"https://relay.example/proxy?next=/models/org/model:generateContent":                                   "https://relay.example/proxy?next=/models/org/model:generateContent",
 		"https://relay.example":          "https://relay.example",
 		"https://relay.example/":         "https://relay.example",
 		"relay.example:8080":             "https://relay.example:8080",
@@ -115,7 +123,7 @@ func TestCustomGeminiProvider(t *testing.T) {
 	}))
 	defer up.Close()
 
-	p := Provider{ID: "gem", Name: "Gem", Key: "AIza-test", Gemini: up.URL + "/proxy/v1beta/models/gemini-2.5-pro:generateContent"}
+	p := Provider{ID: "gem", Name: "Gem", Key: "AIza-test", Gemini: up.URL + "/proxy/v1beta/models/google/gemini-2.5-pro:generateContent"}
 	if err := Save(p); err != nil {
 		t.Fatal(err)
 	}

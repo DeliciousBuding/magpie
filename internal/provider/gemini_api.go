@@ -13,9 +13,19 @@ import (
 // Its base is the URL models/{model}:generateContent goes under, which is
 // where Google's docs and SDKs put the version.
 
-// geminiMethod is a Gemini endpoint pasted whole, cut back to its base:
-// …/models/gemini-2.5-pro:streamGenerateContent?alt=sse, or …/models.
-var geminiMethod = lazyre.New(`/models(?:/[^/?#]*)?(?:[?#].*)?$`)
+// A pasted list or single model needs no :method. A namespaced model does,
+// since /models can also be part of a relay's base. Prefer the versioned
+// base when both the relay prefix and the endpoint contain /models.
+var geminiMethod = lazyre.New(`^([^?#]*/v1(?:alpha|beta)?|[^?#]*?)` +
+	`/models(?:/[^/?#]*|(?:/[^/?#]+)+:[A-Za-z][A-Za-z0-9]*)?(?:[?#].*)?$`)
+
+func trimGeminiEndpoint(u string) string {
+	// Start at the host so the slashes of the scheme cannot start a match.
+	if scheme, addr, ok := strings.Cut(u, "://"); ok {
+		return scheme + "://" + geminiMethod.ReplaceAllString(addr, "$1")
+	}
+	return geminiMethod.ReplaceAllString(u, "$1")
+}
 
 // GeminiBase is the base a Gemini URL is kept as: trimmed, an endpoint or
 // the model list pasted whole cut back to the base. Only Google's own bare
@@ -29,7 +39,7 @@ func GeminiBase(u string) string {
 	if !strings.Contains(u, "://") {
 		u = "https://" + u
 	}
-	u = strings.TrimRight(geminiMethod.ReplaceAllString(u, ""), "/")
+	u = strings.TrimRight(trimGeminiEndpoint(u), "/")
 	if pu, err := url.Parse(u); err == nil && strings.EqualFold(pu.Hostname(), "generativelanguage.googleapis.com") && strings.Trim(pu.Path, "/") == "" {
 		return u + "/v1beta"
 	}

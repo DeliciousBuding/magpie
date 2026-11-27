@@ -47,7 +47,7 @@ func DetectBase(base string, proto Protocol) string {
 		u = strings.TrimSuffix(u, end)
 	}
 	// a Gemini endpoint or a model list pasted whole
-	u = strings.TrimRight(geminiMethod.ReplaceAllString(u, ""), "/")
+	u = strings.TrimRight(trimGeminiEndpoint(u), "/")
 	if u == "" {
 		return ""
 	}
