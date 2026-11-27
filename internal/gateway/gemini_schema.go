@@ -232,10 +232,14 @@ func geminiSchemaShapes(body []byte) []byte {
 // schemaOne those whose value is one schema, schemaList a list of them.
 // additionalProperties, unevaluatedProperties and unevaluatedItems are
 // left out on purpose: their false is the common "nothing else", which
-// every converter knows.
+// every converter knows. "not" and "if" are left out too, just as
+// collectGeminiUntyped leaves them alone: dropping a false property or its
+// required entry inside a negated/conditional predicate would either leave
+// a dangling required entry or turn an unsatisfiable branch into one
+// matching every object.
 var (
 	schemaMaps = map[string]bool{"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true}
-	schemaOne  = map[string]bool{"items": true, "contains": true, "propertyNames": true, "not": true, "if": true, "then": true, "else": true, "contentSchema": true}
+	schemaOne  = map[string]bool{"items": true, "contains": true, "propertyNames": true, "then": true, "else": true, "contentSchema": true}
 	schemaList = map[string]bool{"anyOf": true, "oneOf": true, "allOf": true, "prefixItems": true}
 )
 
@@ -275,6 +279,10 @@ func schemaNeedsShape(node gjson.Result, isSchema bool) bool {
 // shapeSchema is schema s written again without its boolean schemas and
 // x- keywords; keep is false when s itself is false, no schema at all.
 func shapeSchema(s gjson.Result) (raw string, keep bool) {
+	return shapeSchemaAt(s, true)
+}
+
+func shapeSchemaAt(s gjson.Result, pruneReq bool) (raw string, keep bool) {
 	switch s.Type {
 	case gjson.True:
 		return "{}", true
@@ -283,6 +291,22 @@ func shapeSchema(s gjson.Result) (raw string, keep bool) {
 	}
 	if !s.IsObject() || !schemaNeedsShape(s, true) {
 		return s.Raw, true
+	}
+	var dropReq map[string]bool
+	if pruneReq {
+		if req := s.Get("required"); req.IsArray() && len(req.Array()) > 0 {
+			if props := s.Get("properties"); props.IsObject() {
+				props.ForEach(func(name, sub gjson.Result) bool {
+					if sub.Type == gjson.False {
+						if dropReq == nil {
+							dropReq = map[string]bool{}
+						}
+						dropReq[name.String()] = true
+					}
+					return true
+				})
+			}
+		}
 	}
 	var b strings.Builder
 	b.WriteByte('{')
@@ -300,12 +324,31 @@ func shapeSchema(s gjson.Result) (raw string, keep bool) {
 		k := key.String()
 		switch {
 		case strings.HasPrefix(k, "x-"):
+		case k == "required" && v.IsArray() && len(dropReq) > 0:
+			var names []string
+			dropped := false
+			v.ForEach(func(_, name gjson.Result) bool {
+				if name.Type == gjson.String && dropReq[name.String()] {
+					dropped = true
+				} else {
+					names = append(names, name.Raw)
+				}
+				return true
+			})
+			if !dropped {
+				put(key.Raw, v.Raw)
+			} else if len(names) > 0 {
+				put(key.Raw, "["+strings.Join(names, ",")+"]")
+			}
 		case schemaMaps[k] && v.IsObject():
+			// Shared $defs/definitions may be referenced by not/if, so leave
+			// their required lists intact when dropping a false property.
+			childPrune := pruneReq && k != "$defs" && k != "definitions"
 			var m strings.Builder
 			m.WriteByte('{')
 			n := 0
 			v.ForEach(func(name, sub gjson.Result) bool {
-				if r, ok := shapeSchema(sub); ok {
+				if r, ok := shapeSchemaAt(sub, childPrune); ok {
 					if n > 0 {
 						m.WriteByte(',')
 					}
@@ -319,15 +362,18 @@ func shapeSchema(s gjson.Result) (raw string, keep bool) {
 			m.WriteByte('}')
 			put(key.Raw, m.String())
 		case schemaOne[k]:
-			if r, ok := shapeSchema(v); ok {
+			if r, ok := shapeSchemaAt(v, pruneReq); ok {
 				put(key.Raw, r)
 			}
 		case schemaList[k] && v.IsArray():
+			// A oneOf branch's required field can make branches mutually
+			// exclusive; relaxing it could let one input match two branches.
+			childPrune := pruneReq && k != "oneOf"
 			var m strings.Builder
 			m.WriteByte('[')
 			n := 0
 			v.ForEach(func(_, sub gjson.Result) bool {
-				if r, ok := shapeSchema(sub); ok {
+				if r, ok := shapeSchemaAt(sub, childPrune); ok {
 					if n > 0 {
 						m.WriteByte(',')
 					}

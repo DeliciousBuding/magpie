@@ -2,6 +2,9 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -163,5 +166,85 @@ func TestGeminiToolTypesDropsBooleansAndXKeys(t *testing.T) {
 	other := []byte(strings.Replace(string(body), "google/gemini-3.8-flash", "gpt-5.5", 1))
 	if string(geminiToolTypes(other)) != string(other) {
 		t.Error("a non-Gemini body was changed")
+	}
+}
+
+func TestGeminiToolTypesRequiredAcrossShapes(t *testing.T) {
+	const object = `{"type":"object","required":["gone.key","b","a"],"properties":{"a":{"type":"string"},"gone.key":false,"b":{"type":"number"}}}`
+	const body = `{"model":"google/gemini-3.8-flash","tools":[{"type":"function","function":{"name":"t","parameters":%s}}]}`
+	for _, tc := range []struct{ name, schema, path, required string }{
+		{"required first", object, "", `["b","a"]`},
+		{"required last", `{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"number"},"gone.key":false},"required":["gone.key"]}`, "", ""},
+		{"items", `{"type":"array","items":` + object + `}`, "items", `["b","a"]`},
+		{"anyOf", `{"anyOf":[` + object + `]}`, "anyOf.0", `["b","a"]`},
+		{"allOf", `{"allOf":[` + object + `]}`, "allOf.0", `["b","a"]`},
+		{"prefixItems", `{"type":"array","prefixItems":[` + object + `]}`, "prefixItems.0", `["b","a"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := geminiToolTypes(fmt.Appendf(nil, body, tc.schema))
+			if !json.Valid(out) {
+				t.Fatalf("invalid request: %s", out)
+			}
+			s := gjson.GetBytes(out, "tools.0.function.parameters")
+			if tc.path != "" {
+				s = s.Get(tc.path)
+			}
+			if s.Get(`properties.gone\.key`).Exists() || s.Get("properties.a.type").String() != "string" || s.Get("properties.b.type").String() != "number" || s.Get("required").Raw != tc.required {
+				t.Errorf("got %s, want a and b retained, gone.key omitted and required %q", s.Raw, tc.required)
+			}
+		})
+	}
+	// Negated and conditional predicates stay whole so an unsatisfiable branch
+	// neither loses its property into a dangling required nor flips into
+	// matching every object.
+	for _, tc := range []struct{ name, schema, path, want string }{
+		{"not keeps whole branch", `{"type":"object","not":{"properties":{"gone":false},"required":["gone"]}}`, "not", `{"properties":{"gone":false},"required":["gone"]}`},
+		{"if keeps whole branch", `{"type":"object","if":{"properties":{"gone":false},"required":["gone"]},"then":{"properties":{"a":{"type":"string"}}}}`, "if", `{"properties":{"gone":false},"required":["gone"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := geminiToolTypes(fmt.Appendf(nil, body, tc.schema))
+			if got := gjson.GetBytes(out, "tools.0.function.parameters."+tc.path).Raw; got != tc.want {
+				t.Errorf("%s changed to %q, want %q: %s", tc.name, got, tc.want, out)
+			}
+		})
+	}
+	// Shared $defs/definitions may be referenced by not/if, and oneOf branches
+	// may rely on required for mutual exclusion, so their required lists stay.
+	for _, tc := range []struct{ name, schema, path, wantReq string }{
+		{"$defs referenced by not keeps required", `{"type":"object","$defs":{"Impossible":{"type":"object","properties":{"gone":false},"required":["gone"]}},"not":{"$ref":"#/$defs/Impossible"}}`, `$defs.Impossible.required`, `["gone"]`},
+		{"oneOf keeps mutual-exclusion required", `{"type":"object","oneOf":[{"type":"object","properties":{"a":{"type":"string"},"gone":false},"required":["gone"]},{"type":"object","properties":{"a":{"type":"string"}}}]}`, "oneOf.0.required", `["gone"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := geminiToolTypes(fmt.Appendf(nil, body, tc.schema))
+			if got := gjson.GetBytes(out, "tools.0.function.parameters."+tc.path).Raw; got != tc.wantReq {
+				t.Errorf("%s changed to %q, want %q: %s", tc.name, got, tc.wantReq, out)
+			}
+		})
+	}
+	// additionalProperties is left alone on purpose so nested $defs or Copilot's
+	// items handling are not disturbed.
+	ap := fmt.Sprintf(body, `{"type":"object","additionalProperties":{"$defs":{"Never":false},"$ref":"#/additionalProperties/$defs/Never"}}`)
+	if got := string(geminiToolTypes([]byte(ap))); got != ap {
+		t.Errorf("additionalProperties was altered: %s", got)
+	}
+	plain := fmt.Sprintf(body, `{"type":"object", "required": [ "a" ], "properties": {"a":{"type":"string"}}}`)
+	if got := string(geminiToolTypes([]byte(plain))); got != plain {
+		t.Errorf("rewrote an unchanged request: %s", got)
+	}
+}
+
+func TestCopilotGeminiDropsRequiredFalseProperty(t *testing.T) {
+	var sent []string
+	copilotTurnFake(t, map[string]string{"gemini-3.8-flash": `["/chat/completions"]`}, nil, nil, "", 0, &sent)
+	req := `{"model":"copilot/gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object","properties":{"a":{"type":"string"},"gone":false},"required":["a","gone"]}}}]}`
+	rec := httptest.NewRecorder()
+	New().Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(req)))
+	if rec.Code != http.StatusOK || len(sent) != 1 {
+		t.Fatalf("HTTP %d, sent %d requests: %s", rec.Code, len(sent), rec.Body.String())
+	}
+	_, body, _ := strings.Cut(sent[0], " ")
+	s := gjson.Get(body, "tools.0.function.parameters")
+	if s.Get("required").Raw != `["a"]` || s.Get("properties.gone").Exists() {
+		t.Errorf("upstream received %s", s.Raw)
 	}
 }
