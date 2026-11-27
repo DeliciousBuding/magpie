@@ -1306,7 +1306,7 @@ func (u cUsage) counted() (Usage, bool) {
 // its prompt on more than one chunk tells it once (promptCount).
 func (u cUsage) streamed(p *promptCount) Usage {
 	out, whole := u.counted()
-	if !whole {
+	if !whole || (u.PromptTokens == 0 && out.CacheRead == 0 && out.CacheWrite == 0) {
 		return out
 	}
 	return p.fit(out, u.PromptTokens)
@@ -1659,8 +1659,10 @@ func (d *chatDecoder) decode(data string, emit func(Event)) error {
 			emit(Event{Kind: KStop, Stop: stopFromChat(c.FinishReason)})
 		}
 	}
-	if ch.Usage != nil && (ch.Usage.PromptTokens > 0 || ch.Usage.CompletionTokens > 0 || ch.Usage.MagpieDeferred != nil || ch.Usage.Credit != nil) {
-		emit(Event{Kind: KUsage, Usage: ch.Usage.streamed(&d.prompt)})
+	if ch.Usage != nil {
+		if u := ch.Usage.streamed(&d.prompt); !uncounted(u) || u.Deferred != nil || u.Credits != nil || u.inputZeroKnown {
+			emit(Event{Kind: KUsage, Usage: u})
+		}
 	}
 	return nil
 }

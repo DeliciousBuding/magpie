@@ -569,6 +569,9 @@ type Usage struct {
 	// began (after): its prompt counts are the reply's from now on, a
 	// zero too, as what the earlier one counted is the reply's Deferred
 	restart bool
+	// inputZeroKnown: promptCount deduced a known zero uncached input for
+	// this update, so zero replaces any input counted earlier in the stream.
+	inputZeroKnown bool
 
 	Reasoning int `json:"reasoning"`
 	// Served: the model the vendor's reply says answered, when it named
@@ -688,6 +691,7 @@ func (p *promptCount) fit(u Usage, prompt int) Usage {
 		p.write = u.CacheWrite
 	}
 	u.Input = max(p.prompt-p.read-p.write, 0)
+	u.inputZeroKnown = p.prompt > 0 && u.Input == 0
 	u.CacheRead, u.CacheWrite = p.read, p.write
 	return u
 }
@@ -696,7 +700,7 @@ func (u *Usage) add(v Usage) {
 	if v.restart {
 		u.Input, u.CacheRead, u.CacheWrite, u.CacheWrite1h = v.Input, v.CacheRead, v.CacheWrite, v.CacheWrite1h
 	}
-	if v.Input > 0 {
+	if v.Input > 0 || v.inputZeroKnown {
 		u.Input = v.Input
 	}
 	if v.Output > 0 {

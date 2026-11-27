@@ -35,6 +35,11 @@ var promptStreams = []struct {
 		`{"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":2006,"completion_tokens":0,"total_tokens":2006}}`,
 		`{"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":300,"total_tokens":300,"prompt_tokens_details":{"cached_tokens":1920}}}`,
 	}},
+	{"prompt, cache-only, output-only", []string{
+		`{"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":2006,"completion_tokens":0,"total_tokens":2006}}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{}}],"usage":{"prompt_tokens":0,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":1920}}}`,
+		`{"id":"c1","object":"chat.completion.chunk","model":"m1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":300,"total_tokens":300}}`,
+	}},
 }
 
 // chatStreamer answers every request with chunks, as a stream.
@@ -148,5 +153,65 @@ func TestGeminiStreamPromptCountedOnce(t *testing.T) {
 		"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ing.\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":10}}\n\n"))
 	if u := s.usage(); u.Input != 60 || u.CacheRead != 40 || u.Output != 10 {
 		t.Errorf("sniffed in %d, cache read %d, out %d; want 60, 40, 10", u.Input, u.CacheRead, u.Output)
+	}
+}
+
+func TestStreamReportsFullCacheHitAtTheEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proto   provider.Protocol
+		decode  func(string, func(Event)) error
+		chunks  []string
+		wantOut int
+	}{
+		{"gemini", provider.Gemini, (&codeAssistDecoder{}).decode, []string{
+			`{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":100}}`,
+			`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":100,"candidatesTokenCount":2}}`,
+		}, 2},
+		{"chat", provider.Chat, (&chatDecoder{}).decode, []string{
+			`{"choices":[{"delta":{"content":"Hi"}}],"usage":{"prompt_tokens":100}}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens":2}}`,
+		}, 2},
+		{"chat cache-only then output", provider.Chat, (&chatDecoder{}).decode, []string{
+			`{"choices":[{"delta":{"content":"Hi"}}],"usage":{"prompt_tokens":100}}`,
+			`{"choices":[{"delta":{}}],"usage":{"prompt_tokens_details":{"cached_tokens":100}}}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}`,
+		}, 2},
+		{"gemini zero output full cache", provider.Gemini, (&codeAssistDecoder{}).decode, []string{
+			`{"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":100}}`,
+			`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":100}}`,
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := toAnthropic(t, tc.decode, tc.chunks...)
+			if u := usageOfType(t, out, "message_start"); u["input_tokens"] != float64(100) || u["cache_read_input_tokens"] != float64(0) {
+				t.Errorf("start usage %v; want 100 input, 0 cached", u)
+			}
+			if u := usageOfType(t, out, "message_delta"); u["input_tokens"] != float64(0) || u["cache_read_input_tokens"] != float64(100) || u["output_tokens"] != float64(tc.wantOut) {
+				t.Errorf("final usage %v; want 0 input, 100 cached, %d output", u, tc.wantOut)
+			}
+			s := newSniffer(tc.proto, "text/event-stream")
+			for _, chunk := range tc.chunks {
+				s.write([]byte("data: " + chunk + "\n\n"))
+			}
+			billed := s.usage().billed()
+			if billed.Input != 0 || billed.CacheRead != 100 || billed.Output != tc.wantOut {
+				t.Errorf("billed %d input, %d cached, %d output; want 0, 100, %d", billed.Input, billed.CacheRead, billed.Output, tc.wantOut)
+			}
+			ru := routeUsage("fake", "m1", billed)
+			if len(ru) != 1 || ru[0].Input != 0 || ru[0].CacheRead != 100 || ru[0].Output != tc.wantOut {
+				t.Errorf("routeUsage %+v; want 0 input, 100 cached, %d output", ru, tc.wantOut)
+			}
+		})
+	}
+	// An output-only tail chunk after an Anthropic-named cache update keeps
+	// the uncached input instead of reapplying an earlier prompt count.
+	out := toAnthropic(t, (&chatDecoder{}).decode,
+		`{"choices":[{"delta":{"content":"Hi"}}],"usage":{"prompt_tokens":100}}`,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":40,"cache_read_input_tokens":100}}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":5}}`,
+	)
+	if u := usageOfType(t, out, "message_delta"); u["input_tokens"] != float64(40) || u["cache_read_input_tokens"] != float64(100) || u["output_tokens"] != float64(5) {
+		t.Errorf("anthropic-named then output-only: %v; want 40 input, 100 cached, 5 output", u)
 	}
 }

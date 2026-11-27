@@ -1210,7 +1210,7 @@ func routeUsage(id, model string, u Usage) []RouteUsage {
 		out = append(out, RouteUsage{Provider: id, Model: model, Input: d.Input, Output: d.Output,
 			CacheRead: d.CacheRead, CacheWrite: d.CacheWrite, Reasoning: d.Reasoning})
 	}
-	if u.Input+u.Output == 0 {
+	if uncounted(u) {
 		return out
 	}
 	return append(out, RouteUsage{Provider: id, Model: model, Input: u.Input, Output: u.Output,
