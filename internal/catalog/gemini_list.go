@@ -28,7 +28,7 @@ func FetchGemini(ctx context.Context, base, key string, headers map[string]strin
 	at := base + "/models"
 	var out []Model
 	token := ""
-	for range 20 {
+	for range modelPages {
 		u := at + "?pageSize=1000"
 		if token != "" {
 			u += "&pageToken=" + url.QueryEscape(token)
@@ -37,10 +37,16 @@ func FetchGemini(ctx context.Context, base, key string, headers map[string]strin
 		if err != nil {
 			return nil, at, err
 		}
+		if next != "" && next == token {
+			return nil, at, fmt.Errorf("%s: repeated page token in the model list", at)
+		}
 		out = append(out, page...)
 		if token = next; token == "" {
 			break
 		}
+	}
+	if token != "" {
+		return nil, at, fmt.Errorf("%s: still paging after %d pages of the model list", at, modelPages)
 	}
 	if len(out) == 0 {
 		return nil, at, errors.New(at + ": no models listed")

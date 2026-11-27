@@ -944,10 +944,11 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 		return nil, false, "", &ListError{URL: url, Status: res.StatusCode, StatusText: res.Status, Msg: errorMessage(b)}
 	}
 	var v struct {
-		Data    []liveModel `json:"data"`
-		Models  []liveModel `json:"models"`
-		HasMore bool        `json:"has_more"`
-		LastID  string      `json:"last_id"`
+		Data          []liveModel `json:"data"`
+		Models        []liveModel `json:"models"`
+		HasMore       bool        `json:"has_more"`
+		LastID        string      `json:"last_id"`
+		NextPageToken string      `json:"nextPageToken"`
 	}
 	// each row as it was sent too, for one that is a Codex catalog entry
 	// (Model.Codex): rows decoded, so these decode alike
@@ -979,7 +980,11 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 	// end says nothing about what this base serves today, which keeps what
 	// it listed last time. The shape is a convention, not a vendor's —
 	// Anthropic's and OpenAI's /v1/models both page with has_more and
-	// last_id.
+	// last_id. A Gemini-shaped nextPageToken is not followed here, so treat
+	// any non-empty one as an incomplete list even if has_more is also set.
+	if v.NextPageToken != "" {
+		return nil, false, "", fmt.Errorf("%s: only a page of the model list (nextPageToken set), not the whole list", url)
+	}
 	var out []Model
 	vercel, together, jina := VercelGateway(url), TogetherAPI(url), JinaAPI(url)
 	for i, r := range rows {

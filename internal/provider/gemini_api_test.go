@@ -3,12 +3,16 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 func TestGeminiBase(t *testing.T) {
@@ -154,6 +158,39 @@ func TestCustomGeminiProvider(t *testing.T) {
 		if k != "AIza-test|" {
 			t.Errorf("signed %q", k)
 		}
+	}
+}
+
+func TestGeminiRefetchKeepsPickPastPageLimit(t *testing.T) {
+	oneHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset, _ := strconv.Atoi(r.URL.Query().Get("pageToken"))
+		page := offset + 1
+		if page == 21 {
+			fmt.Fprint(w, `{"models":[{"name":"models/picked","supportedGenerationMethods":["generateContent"]}]}`)
+			return
+		}
+		fmt.Fprintf(w, `{"models":[{"name":"models/m-%d","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"%d"}`, page, page)
+	}))
+	defer srv.Close()
+	p := Provider{ID: "gem", Name: "Gem", Key: "k", Gemini: srv.URL + "/v1beta", Models: []string{"picked"}}
+	if err := catalog.SaveLive(p.ID, p.Gemini, []catalog.Model{{ID: "picked"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(p); err != nil {
+		t.Fatal(err)
+	}
+	_, dropped, fetchErr := p.Refetch(t.Context())
+	saved, err := Find(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetchErr == nil || !strings.Contains(fetchErr.Error(), "still paging after 20 pages") || len(dropped) != 0 || !slices.Equal(saved.Models, p.Models) || len(saved.Delisted) != 0 {
+		t.Fatalf("unfinished refresh: err %v, dropped %v, picks %v, delisted %v", fetchErr, dropped, saved.Models, saved.Delisted)
+	}
+	live, _, ok := catalog.Live(p.ID)
+	if !ok || len(live) != 1 || live[0].ID != "picked" {
+		t.Fatalf("live cache overwritten on unfinished refresh: ok=%v live=%+v", ok, live)
 	}
 }
 
