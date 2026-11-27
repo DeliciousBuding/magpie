@@ -70,7 +70,7 @@ func hintsOf(chunks []*rowChunk, rows *chunkRows) []*chunkHints {
 			if id := open.Strings[open.text(p, 11)]; id != "" {
 				h.ids = append(h.ids, uint32(matchHash(id)))
 			}
-			if p.Tokens[0]+p.Tokens[1]+p.Tokens[2]+p.Tokens[3] == 0 && p.Flags&16 == 0 {
+			if !p.hasTokens() && p.Flags&16 == 0 {
 				continue
 			}
 			session := open.Strings[open.text(p, 13)]

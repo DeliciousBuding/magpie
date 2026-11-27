@@ -226,7 +226,7 @@ func finishGatewayModels(s *GatewaySession) {
 	})
 	for _, m := range s.Models {
 		s.Cost += m.Cost
-		if !m.Priced && m.Input+m.Output > 0 {
+		if !m.Priced {
 			s.Unpriced++
 		}
 	}
@@ -522,7 +522,7 @@ func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]boo
 		}
 		p := priceOf(r)
 		cost, priced := 0.0, true
-		if r.Input+r.Output > 0 {
+		if r.hasTokens() {
 			if p == nil {
 				priced = false
 			} else {
@@ -571,22 +571,12 @@ func countGateway(blocks []*rowChunk, since time.Time, nativeKeys map[string]boo
 			m = &GatewayModel{Model: model, Priced: true}
 			acc.models[model] = m
 		}
-		m.addRecord(r, p)
+		m.Input += r.Input
+		m.Output += r.Output
+		m.CacheRead += r.CacheRead
+		m.CacheWrite += r.CacheWrite
+		m.CacheWrite1h += r.CacheWrite1h
+		m.Cost += cost
+		m.Priced = m.Priced && priced
 	})
-}
-
-func (m *GatewayModel) addRecord(r Record, p *catalog.Price) {
-	m.Input += r.Input
-	m.Output += r.Output
-	m.CacheRead += r.CacheRead
-	m.CacheWrite += r.CacheWrite
-	m.CacheWrite1h += r.CacheWrite1h
-	if r.Input+r.Output == 0 {
-		return
-	}
-	if p == nil {
-		m.Priced = false
-		return
-	}
-	m.Cost += r.CostAt(*p)
 }

@@ -605,6 +605,12 @@ const (
 // Periods lists the windows in order.
 var Periods = []Period{Today, Week, Month, All}
 
+// hasTokens includes cache reads and writes. Reasoning and one-hour writes
+// are already part of output and cache writes, respectively.
+func (r *Record) hasTokens() bool {
+	return r.Input > 0 || r.Output > 0 || r.CacheRead > 0 || r.CacheWrite > 0
+}
+
 // CostAt is what the call costs at a price: at the tier its input reaches,
 // its 1-hour cache writes at theirs, and at the hour it was made (an
 // off-peak price doubles at peak, Price.In). A reported call that said
@@ -1034,7 +1040,7 @@ func (t *Totals) addFrom(row Row, price *catalog.Price) {
 			t.Rates = t.Rates.withSpeed(n, w)
 		}
 	}
-	if r.Input+r.Output == 0 {
+	if !r.hasTokens() {
 		return
 	}
 	if price == nil {
@@ -1080,7 +1086,7 @@ func (t *Totals) count(r Record) {
 // status and the vendor's words (Dazzle_sys on X), but no call, no model
 // a session went through and nothing spent.
 func (r Record) TriedOnly() bool {
-	return r.HandedOn && r.Input+r.Output+r.CacheRead+r.CacheWrite == 0
+	return r.HandedOn && !r.hasTokens()
 }
 
 // LostRequest is whether r ends a request the agent got an error for: a
@@ -1145,7 +1151,7 @@ func (g *Group) addOwn(r Record, price *catalog.Price) {
 		g.Own.Calls++
 	}
 	g.Own.Tokens += r.Input + r.Output
-	if price != nil && r.Input+r.Output > 0 {
+	if price != nil && r.hasTokens() {
 		g.Own.Cost += r.CostAt(*price)
 	}
 }

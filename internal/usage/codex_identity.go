@@ -800,7 +800,7 @@ type effortSums map[string]map[modelEffortKey]*effortTotal
 
 func (groups effortSums) add(row *Row) {
 	if row.codexActor == "" || row.IsRejected() ||
-		row.Input+row.Output+row.CacheRead+row.CacheWrite == 0 {
+		!row.hasTokens() {
 		return
 	}
 	byModel := groups[row.codexActor]

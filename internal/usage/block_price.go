@@ -328,13 +328,13 @@ func (b *blockPricer) priceBlock(packed *rowChunk) (*rowChunk, *[]packedRow) {
 		p.Flags = p.Flags&^(1|2|32) | got.flags
 		if p.Flags&rowOwnCost != 0 {
 			// a reported call that said what it cost costs that (#1874)
-			if p.Tokens[0]+p.Tokens[1] > 0 {
+			if p.hasTokens() {
 				p.Flags |= 1
 			}
 			continue
 		}
 		p.Cost = 0
-		if got.price != nil && p.Tokens[0]+p.Tokens[1] > 0 {
+		if got.price != nil && p.hasTokens() {
 			p.Flags |= 1
 			p.Cost = atWindow(got.price, got.windows, p.Time()).In(p.Time()).CostSplit(int(p.Tokens[0]), int(p.Tokens[1]), int(p.Tokens[2]), int(p.Tokens[3]), int(p.Tokens[5]))
 		}

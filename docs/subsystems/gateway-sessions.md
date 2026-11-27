@@ -191,7 +191,9 @@ each poll while a session grew. Verification:
 `TestSessionsListMakesOnlyTheGatewayRowsItShows`,
 `TestEachMergedMakesOnlyTheRowsItReaches`. Their
 models, token totals, start/last timestamps and effective prices come from the
-same usage records used by Usage and stats endpoints.
+same usage records used by Usage and stats endpoints. A call that only read
+or wrote cached tokens contributes its cache cost. If its price is unknown,
+its model and day are marked unpriced.
 
 A model the user counts under another id (`usageAliases` in settings.json,
 `magpie model alias`; [`provider.UsageAlias`](../../internal/provider/usagealias.go))

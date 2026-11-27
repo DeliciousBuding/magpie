@@ -223,7 +223,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 	paidOtherwise := map[runKey]bool{} // the vendor answered a call after a reading of none left
 	inRun := map[slot][]runKey{}       // the dry runs a counted call fell in
 	read(func(r Record) {
-		if r.IsRejected() || r.IsReported() || r.Input+r.Output == 0 {
+		if r.IsRejected() || r.IsReported() || !r.hasTokens() {
 			return
 		}
 		// who answered, not who a merge shows it under (Renames.Own)
@@ -286,7 +286,7 @@ func windowHolds(qs []provider.SubscriptionQuota, now, first time.Time, priceOf 
 	for s := range want {
 		h := sums[s]
 		switch {
-		case h == nil || h.Routed.Tokens <= 0:
+		case h == nil:
 			why[s] = provider.HoldsNoneRouted
 		case slices.ContainsFunc(inRun[s], func(k runKey) bool { return paidOtherwise[k] }):
 			why[s] = provider.HoldsCredits

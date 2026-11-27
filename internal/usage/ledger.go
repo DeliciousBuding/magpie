@@ -497,7 +497,7 @@ func ledgerMatched(since, until time.Time, f Filter, recs []Record, logs []sessi
 		if !f.keepsRow(&row) {
 			return
 		}
-		if pr != nil && r.Input+r.Output > 0 {
+		if pr != nil && r.hasTokens() {
 			row.Cost, row.Priced = r.CostAt(*pr), true
 		}
 		row.Agent, row.Client = reportedAs(r.Agent)
@@ -1021,7 +1021,7 @@ func (t *Totals) addRow(r Row) {
 	switch {
 	case r.Priced:
 		t.Cost += r.Cost
-	case r.Input+r.Output > 0:
+	case r.hasTokens():
 		t.Unpriced++
 	}
 }

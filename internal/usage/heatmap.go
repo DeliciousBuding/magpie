@@ -102,7 +102,7 @@ func (h *heatDays) add(r *Row, since time.Time, loc *time.Location) {
 	switch {
 	case r.Priced:
 		x.Cost += r.Cost
-	case r.Input+r.Output > 0:
+	case r.hasTokens():
 		x.Unpriced++
 	}
 }

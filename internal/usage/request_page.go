@@ -191,6 +191,10 @@ func msOf(ms int64) int32 { return int32(max(min(ms, math.MaxInt32), math.MinInt
 // tokensOf is a token count as a packedRow keeps it.
 func tokensOf(n int64) int32 { return int32(max(min(n, math.MaxInt32), math.MinInt32)) }
 
+func (p *packedRow) hasTokens() bool {
+	return p.Tokens[0] > 0 || p.Tokens[1] > 0 || p.Tokens[2] > 0 || p.Tokens[3] > 0
+}
+
 // Time is the row's time, in the zone it was written in.
 func (p *packedRow) Time() time.Time {
 	if p.zone == 0 {
@@ -2384,7 +2388,7 @@ func matchedBlocks(gateways []*rowChunk, chunks []*rowChunk, skip refSet, respon
 				continue
 			}
 			failed := p.Flags&16 != 0
-			if p.Tokens[0]+p.Tokens[1]+p.Tokens[2]+p.Tokens[3] == 0 && !failed {
+			if !p.hasTokens() && !failed {
 				continue
 			}
 			key := matchKey{session: c.Strings[c.text(p, 13)], failed: failed}
@@ -3150,7 +3154,7 @@ func sessionRowPricer(cfg settings.Settings) func(Record, string) Row {
 			}
 			row.Swapped = s
 		}
-		if pr := price(r); pr != nil && r.Input+r.Output > 0 {
+		if pr := price(r); pr != nil && r.hasTokens() {
 			row.Priced = true
 			row.Cost = r.CostAt(*pr)
 		}
